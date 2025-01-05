@@ -1,0 +1,59 @@
+include:
+  - project: 'my-group/aws'
+    file: '/aws-assume-role.yml'
+
+stages:
+  - build
+  - test
+  - release
+  - publish
+  - aws
+
+build_zeus:
+  stage: build
+  image: golang:latest
+  script:
+    - cd zeus
+    - go build -o zeus
+  artifacts:
+    paths:
+      - zeus/zeus
+
+test:
+  stage: test
+  image: golang:latest
+  script:
+    - cd zeus
+    - go test ./...
+
+aws_ecr_upload_zeus_image:
+  image: docker:stable
+  stage: aws
+  extends: .assume_role_alpine_template
+  services:
+    - docker:dind
+  script:
+    - export IMAGE_TAG=zeus
+    - 'wget --header="PRIVATE-TOKEN: $GITLAB_ACCESS_TOKEN" -O artifacts.zip "$TF_STATE_OUTPUT_URL"'
+    - unzip artifacts.zip
+    - APP_ECR_REPO_URL=$(jq -r --arg key "$TF_KEY_APP_ECR_REPO_URL" '.[$key].value' output.json)
+    - cd zeus
+    - docker login --username AWS -p $(aws ecr get-login-password --region $AWS_DEFAULT_REGION) $APP_ECR_REPO_URL
+    - docker build -t "$IMAGE_TAG" -f Dockerfile.prd .
+    - docker tag "$IMAGE_TAG" "$APP_ECR_REPO_URL:$CI_COMMIT_SHORT_SHA"
+    - docker push "$APP_ECR_REPO_URL:$CI_COMMIT_SHORT_SHA"
+    - docker tag "$IMAGE_TAG" "$APP_ECR_REPO_URL:latest"
+    - docker push "$APP_ECR_REPO_URL:latest"
+  when: manual
+
+aws_ecs_deploy:
+  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+  stage: aws
+  extends: .assume_role_template
+  script:
+    - 'curl -L -H "PRIVATE-TOKEN: $GITLAB_ACCESS_TOKEN" -o artifacts.zip "$TF_STATE_OUTPUT_URL"'
+    - unzip artifacts.zip
+    - APP_ECS_CLUSTER_NAME=$(jq -r --arg key "$TF_KEY_APP_ECS_CLUSTER_NAME" '.[$key].value' output.json)
+    - APP_ECS_SERVICE_NAME=$(jq -r --arg key "$TF_KEY_APP_ECS_SERVICE_NAME" '.[$key].value' output.json)
+    - aws ecs update-service --cluster $APP_ECS_CLUSTER_NAME --service $APP_ECS_SERVICE_NAME --force-new-deployment
+  when: manual

@@ -1,0 +1,39 @@
+include:
+  - project: 'my-group/aws'
+    file: '/aws-assume-role.yml'
+    
+stages:
+  - build
+  - deploy
+
+build artifact:
+  stage: build
+  image: node:latest
+  before_script:
+    - npm install
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - build/
+    when: always
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: on_success
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+      when: manual
+
+aws_credentials:
+  stage: deploy
+  extends: .assume_role_dotenv_template
+
+deploy s3:
+  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+  needs: [aws_credentials]
+  stage: deploy
+  script:
+    - 'curl -L -H "PRIVATE-TOKEN: $GITLAB_ACCESS_TOKEN" -o artifacts.zip "$TF_STATE_OUTPUT_URL"'
+    - unzip artifacts.zip
+    - S3_BUCKET=$(jq -r --arg key "$TF_KEY_S3_BUCKET" '.[$key].value' output.json)
+    - aws s3 sync build/ s3://$S3_BUCKET
+  when: manual
